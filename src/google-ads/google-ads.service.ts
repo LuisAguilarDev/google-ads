@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { GoogleAdsApi, Customer } from 'google-ads-api';
+import { GoogleAdsApi, Customer, enums } from 'google-ads-api';
 import {
   CampaignConfig,
   CampaignResult,
@@ -18,11 +18,11 @@ export class GoogleAdsService implements OnModuleInit {
 
   onModuleInit() {
     this.config = {
-      clientId: this.configService.get<string>('GOOGLE_ADS_CLIENT_ID'),
-      clientSecret: this.configService.get<string>('GOOGLE_ADS_CLIENT_SECRET'),
-      developerToken: this.configService.get<string>('GOOGLE_ADS_DEVELOPER_TOKEN'),
-      refreshToken: this.configService.get<string>('GOOGLE_ADS_REFRESH_TOKEN'),
-      customerId: this.configService.get<string>('GOOGLE_ADS_CUSTOMER_ID'),
+      clientId: this.configService.get<string>('GOOGLE_ADS_CLIENT_ID') || '',
+      clientSecret: this.configService.get<string>('GOOGLE_ADS_CLIENT_SECRET') || '',
+      developerToken: this.configService.get<string>('GOOGLE_ADS_DEVELOPER_TOKEN') || '',
+      refreshToken: this.configService.get<string>('GOOGLE_ADS_REFRESH_TOKEN') || '',
+      customerId: this.configService.get<string>('GOOGLE_ADS_CUSTOMER_ID') || '',
     };
 
     this.initializeClient();
@@ -58,10 +58,10 @@ export class GoogleAdsService implements OnModuleInit {
       const campaign = await this.customer.campaigns.create([
         {
           name: config.name,
-          advertising_channel_type: 'SEARCH',
-          status: 'ENABLED',
+          advertising_channel_type: enums.AdvertisingChannelType.SEARCH,
+          status: enums.CampaignStatus.ENABLED,
           campaign_budget: budget.resource_name,
-          bidding_strategy_type: 'MAXIMIZE_CLICKS',
+          bidding_strategy_type: enums.BiddingStrategyType.MAXIMIZE_CLICKS,
           network_settings: {
             target_google_search: true,
             target_search_network: true,
@@ -72,7 +72,7 @@ export class GoogleAdsService implements OnModuleInit {
         },
       ]);
 
-      const campaignResourceName = campaign.results[0].resource_name;
+      const campaignResourceName = campaign.results[0].resource_name!;
       this.logger.log(`Campaign created: ${campaignResourceName}`);
 
       // 3. Create ad group
@@ -113,11 +113,11 @@ export class GoogleAdsService implements OnModuleInit {
       {
         name: `Budget: ${name}`,
         amount_micros: amountMicros,
-        delivery_method: 'STANDARD',
+        delivery_method: enums.BudgetDeliveryMethod.STANDARD,
       },
     ]);
 
-    return { resource_name: result.results[0].resource_name };
+    return { resource_name: result.results[0].resource_name! };
   }
 
   private async createAdGroup(
@@ -129,14 +129,14 @@ export class GoogleAdsService implements OnModuleInit {
       {
         campaign: campaignResourceName,
         name: `AG: ${name}`,
-        status: 'ENABLED',
-        type: 'SEARCH_STANDARD',
+        status: enums.AdGroupStatus.ENABLED,
+        type: enums.AdGroupType.SEARCH_STANDARD,
         cpc_bid_micros: cpcBidMicros,
       },
     ]);
 
     this.logger.log(`Ad group created: ${result.results[0].resource_name}`);
-    return { resource_name: result.results[0].resource_name };
+    return { resource_name: result.results[0].resource_name! };
   }
 
   private async addKeywords(
@@ -145,14 +145,14 @@ export class GoogleAdsService implements OnModuleInit {
   ): Promise<void> {
     const keywordOperations = keywords.map((keyword) => ({
       ad_group: adGroupResourceName,
-      status: 'ENABLED',
+      status: enums.AdGroupCriterionStatus.ENABLED,
       keyword: {
         text: keyword,
-        match_type: 'BROAD',
+        match_type: enums.KeywordMatchType.BROAD,
       },
     }));
 
-    await this.customer.adGroupCriteria.create(keywordOperations);
+    await this.customer.adGroupCriteria.create(keywordOperations as any);
     this.logger.log(`${keywords.length} keywords added to ad group`);
   }
 
@@ -168,7 +168,7 @@ export class GoogleAdsService implements OnModuleInit {
     await this.customer.adGroupAds.create([
       {
         ad_group: adGroupResourceName,
-        status: 'ENABLED',
+        status: enums.AdGroupAdStatus.ENABLED,
         ad: {
           responsive_search_ad: {
             headlines: headlineAssets,
@@ -186,7 +186,7 @@ export class GoogleAdsService implements OnModuleInit {
     await this.customer.campaigns.update([
       {
         resource_name: campaignResourceName,
-        status: 'PAUSED',
+        status: enums.CampaignStatus.PAUSED,
       },
     ]);
 
@@ -197,7 +197,7 @@ export class GoogleAdsService implements OnModuleInit {
     await this.customer.campaigns.update([
       {
         resource_name: campaignResourceName,
-        status: 'ENABLED',
+        status: enums.CampaignStatus.ENABLED,
       },
     ]);
 
@@ -208,7 +208,7 @@ export class GoogleAdsService implements OnModuleInit {
     await this.customer.campaigns.update([
       {
         resource_name: campaignResourceName,
-        status: 'REMOVED',
+        status: enums.CampaignStatus.REMOVED,
       },
     ]);
 

@@ -30,4 +30,5 @@ export interface Article {
   keywords: string[];
   category: string;
   publishedAt: Date;
+  shortDescription?: string;
 }
