@@ -61,7 +61,7 @@ export class GoogleAdsService implements OnModuleInit {
           advertising_channel_type: enums.AdvertisingChannelType.SEARCH,
           status: enums.CampaignStatus.ENABLED,
           campaign_budget: budget.resource_name,
-          bidding_strategy_type: enums.BiddingStrategyType.MAXIMIZE_CLICKS,
+          bidding_strategy_type: "MAXIMIZE_CONVERSIONS", //TODO! FIX THIS TO USE ENUM
           network_settings: {
             target_google_search: true,
             target_search_network: true,
