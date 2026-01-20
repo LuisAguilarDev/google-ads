@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, HttpException, HttpStatus } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { GoogleAdsApi, Customer, enums, resources } from 'google-ads-api';
 import {
@@ -52,21 +52,25 @@ export class GoogleAdsService implements OnModuleInit {
     this.logger.log(`Campaign name: ${config.name}`);
     this.logger.log(`Config: ${JSON.stringify(config, null, 2)}`);
 
+    let budgetResourceName: string | null = null;
+    let campaignResourceName: string | null = null;
+
     try {
       // 1. Create campaign budget
       this.logger.log(`[STEP 1/5] Creating campaign budget...`);
-      this.logger.log(`  - Budget name: Budget: ${config.name}`);
+      this.logger.log(`  - Budget name prefix: Budget: ${config.name}`);
       this.logger.log(`  - Amount (micros): ${config.budgetMicros}`);
 
       const budget = await this.createCampaignBudget(config.name, config.budgetMicros);
-      this.logger.log(`[STEP 1/5] ✓ Budget created: ${budget.resource_name}`);
+      budgetResourceName = budget.resource_name;
+      this.logger.log(`[STEP 1/5] ✓ Budget created: ${budgetResourceName}`);
 
       this.logger.log(`[STEP 2/5] Creating campaign...`);
       const campaignData: (resources.ICampaign | resources.Campaign) = {
         name: config.name,
         advertising_channel_type: enums.AdvertisingChannelType.SEARCH,
         status: enums.CampaignStatus.PAUSED,
-        campaign_budget: budget.resource_name,
+        campaign_budget: budgetResourceName,
         manual_cpc: {
           enhanced_cpc_enabled: false,
         },
@@ -83,7 +87,7 @@ export class GoogleAdsService implements OnModuleInit {
 
       const campaign = await this.customer.campaigns.create([campaignData]);
 
-      const campaignResourceName = campaign.results[0].resource_name!;
+      campaignResourceName = campaign.results[0].resource_name!;
       this.logger.log(`[STEP 2/5] ✓ Campaign created: ${campaignResourceName}`);
 
       // 3. Create ad group
@@ -139,16 +143,220 @@ export class GoogleAdsService implements OnModuleInit {
         this.logger.error(`Request ID: ${error.request_id}`);
       }
       this.logger.error(`Full error: ${JSON.stringify(error, null, 2)}`);
-      throw error;
+
+      // Rollback: clean up created resources
+      await this.rollbackCampaignCreation(campaignResourceName, budgetResourceName);
+
+      // Throw a proper HttpException with error details
+      throw this.createHttpException(error);
     }
+  }
+
+  private async rollbackCampaignCreation(
+    campaignResourceName: string | null,
+    budgetResourceName: string | null,
+  ): Promise<void> {
+    this.logger.warn(`[ROLLBACK] Starting cleanup of partially created resources...`);
+    this.logger.warn(`[ROLLBACK] Campaign to remove: ${campaignResourceName || 'none'}`);
+    this.logger.warn(`[ROLLBACK] Budget to remove: ${budgetResourceName || 'none'}`);
+
+    let campaignRemoved = false;
+
+    // Remove campaign first (this will also remove ad groups, ads, keywords)
+    if (campaignResourceName) {
+      // Strategy 1: Try using remove method
+      this.logger.warn(`[ROLLBACK] Attempting to remove campaign using remove() method...`);
+      try {
+        await this.customer.campaigns.remove([campaignResourceName]);
+        this.logger.warn(`[ROLLBACK] ✓ Campaign removed via remove(): ${campaignResourceName}`);
+        campaignRemoved = true;
+      } catch (removeError: any) {
+        const removeErrorMessage = this.extractErrorMessage(removeError);
+        this.logger.warn(`[ROLLBACK] remove() failed: ${removeErrorMessage}`);
+        this.logger.debug(`[ROLLBACK] remove() full error: ${JSON.stringify(removeError, null, 2)}`);
+
+        // Strategy 2: Fallback to update with REMOVED status
+        this.logger.warn(`[ROLLBACK] Attempting to remove campaign using update() with REMOVED status...`);
+        try {
+          await this.customer.campaigns.update([
+            {
+              resource_name: campaignResourceName,
+              status: enums.CampaignStatus.REMOVED,
+            },
+          ]);
+          this.logger.warn(`[ROLLBACK] ✓ Campaign removed via update(): ${campaignResourceName}`);
+          campaignRemoved = true;
+        } catch (updateError: any) {
+          const updateErrorMessage = this.extractErrorMessage(updateError);
+          this.logger.error(`[ROLLBACK] update() also failed: ${updateErrorMessage}`);
+          this.logger.debug(`[ROLLBACK] update() full error: ${JSON.stringify(updateError, null, 2)}`);
+        }
+      }
+    }
+
+    // Remove budget - need to wait a bit after campaign removal
+    if (budgetResourceName) {
+      // If campaign was removed, wait for it to propagate
+      if (campaignRemoved) {
+        this.logger.warn(`[ROLLBACK] Waiting 2s for campaign removal to propagate before removing budget...`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+
+      this.logger.warn(`[ROLLBACK] Attempting to remove budget...`);
+      try {
+        await this.customer.campaignBudgets.remove([budgetResourceName]);
+        this.logger.warn(`[ROLLBACK] ✓ Budget removed: ${budgetResourceName}`);
+      } catch (rollbackError: any) {
+        const errorMessage = this.extractErrorMessage(rollbackError);
+        this.logger.debug(`[ROLLBACK] Budget removal full error: ${JSON.stringify(rollbackError, null, 2)}`);
+
+        // Check if budget is still in use - this is expected if campaign couldn't be removed
+        if (errorMessage.includes('associated with') || errorMessage.includes('in use')) {
+          this.logger.warn(`[ROLLBACK] Budget cannot be removed (still associated with campaign): ${errorMessage}`);
+          this.logger.warn(`[ROLLBACK] Note: Budget will remain orphaned. Consider manual cleanup.`);
+        } else {
+          this.logger.error(`[ROLLBACK] Failed to remove budget: ${errorMessage}`);
+        }
+      }
+    }
+
+    this.logger.warn(`[ROLLBACK] Cleanup completed. Campaign removed: ${campaignRemoved}, Budget to cleanup: ${budgetResourceName || 'none'}`);
+  }
+
+  private extractErrorMessage(error: any): string {
+    if (!error) return 'Unknown error';
+
+    // Handle Google Ads API error format
+    if (error.errors && Array.isArray(error.errors) && error.errors.length > 0) {
+      const messages = error.errors.map((e: any) => e.message || JSON.stringify(e.error_code));
+      return messages.join('; ');
+    }
+
+    // Handle standard error message
+    if (error.message) {
+      return error.message;
+    }
+
+    // Fallback to stringifying the error
+    return JSON.stringify(error);
+  }
+
+  private createHttpException(error: any): HttpException {
+    // If it's already an HttpException, just return it
+    if (error instanceof HttpException) {
+      return error;
+    }
+
+    // Extract error details from Google Ads API error
+    const errorDetails = this.extractGoogleAdsErrorDetails(error);
+
+    return new HttpException(
+      {
+        statusCode: errorDetails.statusCode,
+        message: errorDetails.message,
+        errors: errorDetails.errors,
+        requestId: errorDetails.requestId,
+        timestamp: new Date().toISOString(),
+      },
+      errorDetails.statusCode,
+    );
+  }
+
+  private extractGoogleAdsErrorDetails(error: any): {
+    statusCode: number;
+    message: string;
+    errors: any[];
+    requestId: string | null;
+  } {
+    const requestId = error?.request_id || null;
+
+    // Handle Google Ads API error format
+    if (error?.errors && Array.isArray(error.errors) && error.errors.length > 0) {
+      const formattedErrors = error.errors.map((e: any) => ({
+        code: e.error_code ? Object.keys(e.error_code)[0] : 'UNKNOWN',
+        type: e.error_code ? Object.values(e.error_code)[0] : 'UNKNOWN',
+        message: e.message || 'Unknown error',
+        field: e.location?.field_path_elements?.map((f: any) => f.field_name).join('.') || null,
+        trigger: e.trigger ? Object.values(e.trigger)[0] : null,
+      }));
+
+      // Determine status code based on error type
+      const statusCode = this.determineStatusCode(error.errors);
+      const primaryMessage = formattedErrors[0]?.message || 'Google Ads API error';
+
+      return {
+        statusCode,
+        message: primaryMessage,
+        errors: formattedErrors,
+        requestId,
+      };
+    }
+
+    // Handle standard error
+    return {
+      statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+      message: error?.message || 'An unexpected error occurred',
+      errors: [],
+      requestId,
+    };
+  }
+
+  private determineStatusCode(errors: any[]): number {
+    // Check for specific error types to determine appropriate HTTP status
+    for (const error of errors) {
+      const errorCode = error.error_code || {};
+      const errorType = Object.keys(errorCode)[0];
+      const errorValue = Object.values(errorCode)[0];
+
+      // Validation errors -> 400 Bad Request
+      if (
+        errorType === 'range_error' ||
+        errorType === 'currency_error' ||
+        errorType === 'string_length_error' ||
+        errorType === 'field_error' ||
+        errorValue === 'DUPLICATE_CAMPAIGN_NAME' ||
+        errorValue === 'DUPLICATE_NAME' ||
+        errorValue === 'TOO_LOW' ||
+        errorValue === 'TOO_HIGH' ||
+        errorValue === 'VALUE_NOT_MULTIPLE_OF_BILLABLE_UNIT'
+      ) {
+        return HttpStatus.BAD_REQUEST;
+      }
+
+      // Authentication errors -> 401
+      if (errorType === 'authentication_error') {
+        return HttpStatus.UNAUTHORIZED;
+      }
+
+      // Authorization errors -> 403
+      if (errorType === 'authorization_error') {
+        return HttpStatus.FORBIDDEN;
+      }
+
+      // Not found errors -> 404
+      if (errorType === 'resource_not_found_error') {
+        return HttpStatus.NOT_FOUND;
+      }
+
+      // Quota errors -> 429 Too Many Requests
+      if (errorType === 'quota_error') {
+        return HttpStatus.TOO_MANY_REQUESTS;
+      }
+    }
+
+    // Default to 400 for most Google Ads API errors
+    return HttpStatus.BAD_REQUEST;
   }
 
   private async createCampaignBudget(
     name: string,
     amountMicros: number,
   ): Promise<{ resource_name: string }> {
+    // Add timestamp to budget name to avoid duplicate name errors on retry
+    const timestamp = Date.now();
+    const budgetName = `Budget: ${name} (${timestamp})`;
     const budgetData = {
-      name: `Budget: ${name}`,
+      name: budgetName,
       amount_micros: amountMicros,
       delivery_method: enums.BudgetDeliveryMethod.STANDARD,
     };

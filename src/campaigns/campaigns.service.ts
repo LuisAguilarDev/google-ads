@@ -39,7 +39,7 @@ export class CampaignsService {
     );
     this.defaultCpcBidMicros = this.configService.get<number>(
       'DEFAULT_CPC_BID_MICROS',
-      500000,
+      1000000,
     );
     this.defaultDurationHours = this.configService.get<number>(
       'DEFAULT_CAMPAIGN_DURATION_HOURS',
@@ -58,7 +58,7 @@ export class CampaignsService {
     const result = await this.googleAdsService.createCampaign({
       name: dto.name,
       budgetMicros: dto.budgetMicros,
-      cpcBidMicros: dto.cpcBidMicros || this.defaultCpcBidMicros,
+      cpcBidMicros: Math.max(dto.cpcBidMicros ?? 0, this.defaultCpcBidMicros),
       startDate,
       endDate,
       keywords: dto.keywords,
