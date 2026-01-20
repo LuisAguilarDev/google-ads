@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { GoogleAdsApi, Customer, enums } from 'google-ads-api';
+import { GoogleAdsApi, Customer, enums, resources } from 'google-ads-api';
 import {
   CampaignConfig,
   CampaignResult,
@@ -48,59 +48,97 @@ export class GoogleAdsService implements OnModuleInit {
   }
 
   async createCampaign(config: CampaignConfig): Promise<CampaignResult> {
-    this.logger.log(`Creating campaign: ${config.name}`);
+    this.logger.log(`========== STARTING CAMPAIGN CREATION ==========`);
+    this.logger.log(`Campaign name: ${config.name}`);
+    this.logger.log(`Config: ${JSON.stringify(config, null, 2)}`);
 
     try {
       // 1. Create campaign budget
-      const budget = await this.createCampaignBudget(config.name, config.budgetMicros);
+      this.logger.log(`[STEP 1/5] Creating campaign budget...`);
+      this.logger.log(`  - Budget name: Budget: ${config.name}`);
+      this.logger.log(`  - Amount (micros): ${config.budgetMicros}`);
 
-      // 2. Create the campaign
-      const campaign = await this.customer.campaigns.create([
-        {
-          name: config.name,
-          advertising_channel_type: enums.AdvertisingChannelType.SEARCH,
-          status: enums.CampaignStatus.ENABLED,
-          campaign_budget: budget.resource_name,
-          bidding_strategy_type: "MAXIMIZE_CONVERSIONS", //TODO! FIX THIS TO USE ENUM
-          network_settings: {
-            target_google_search: true,
-            target_search_network: true,
-            target_content_network: false,
-          },
-          start_date: this.formatDate(config.startDate),
-          end_date: this.formatDate(config.endDate),
+      const budget = await this.createCampaignBudget(config.name, config.budgetMicros);
+      this.logger.log(`[STEP 1/5] ✓ Budget created: ${budget.resource_name}`);
+
+      this.logger.log(`[STEP 2/5] Creating campaign...`);
+      const campaignData: (resources.ICampaign | resources.Campaign) = {
+        name: config.name,
+        advertising_channel_type: enums.AdvertisingChannelType.SEARCH,
+        status: enums.CampaignStatus.PAUSED,
+        campaign_budget: budget.resource_name,
+        manual_cpc: {
+          enhanced_cpc_enabled: false,
         },
-      ]);
+        network_settings: {
+          target_google_search: true,
+          target_search_network: false,
+          target_content_network: false,
+        },
+        start_date: this.formatDate(config.startDate),
+        end_date: this.formatDate(config.endDate),
+        contains_eu_political_advertising: "DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING",
+      };
+      this.logger.log(`  - Campaign data: ${JSON.stringify(campaignData, null, 2)}`);
+
+      const campaign = await this.customer.campaigns.create([campaignData]);
 
       const campaignResourceName = campaign.results[0].resource_name!;
-      this.logger.log(`Campaign created: ${campaignResourceName}`);
+      this.logger.log(`[STEP 2/5] ✓ Campaign created: ${campaignResourceName}`);
 
       // 3. Create ad group
+      this.logger.log(`[STEP 3/5] Creating ad group...`);
+      this.logger.log(`  - Ad group name: AG: ${config.name}`);
+      this.logger.log(`  - CPC bid (micros): ${config.cpcBidMicros}`);
+
       const adGroup = await this.createAdGroup(
         campaignResourceName,
         config.name,
         config.cpcBidMicros,
       );
+      this.logger.log(`[STEP 3/5] ✓ Ad group created: ${adGroup.resource_name}`);
 
       // 4. Add keywords
+      this.logger.log(`[STEP 4/5] Adding keywords...`);
+      this.logger.log(`  - Keywords: ${config.keywords.join(', ')}`);
+
       await this.addKeywords(adGroup.resource_name, config.keywords);
+      this.logger.log(`[STEP 4/5] ✓ ${config.keywords.length} keywords added`);
 
       // 5. Create ad
+      this.logger.log(`[STEP 5/5] Creating responsive search ad...`);
+      this.logger.log(`  - Headlines: ${config.headlines.join(', ')}`);
+      this.logger.log(`  - Descriptions: ${config.descriptions.join(', ')}`);
+      this.logger.log(`  - Final URL: ${config.finalUrl}`);
+
       await this.createResponsiveSearchAd(
         adGroup.resource_name,
         config.headlines,
         config.descriptions,
         config.finalUrl,
       );
+      this.logger.log(`[STEP 5/5] ✓ Responsive search ad created`);
+
+      this.logger.log(`========== CAMPAIGN CREATION COMPLETED ==========`);
+      this.logger.log(`Campaign ID: ${this.extractId(campaignResourceName)}`);
+      this.logger.log(`Ad Group ID: ${this.extractId(adGroup.resource_name)}`);
 
       return {
         campaignId: this.extractId(campaignResourceName),
         adGroupId: this.extractId(adGroup.resource_name),
-        status: 'ENABLED',
+        status: 'PAUSED',
         resourceName: campaignResourceName,
       };
-    } catch (error) {
-      this.logger.error('Error creating campaign', error);
+    } catch (error: any) {
+      this.logger.error(`========== CAMPAIGN CREATION FAILED ==========`);
+      this.logger.error(`Error message: ${error?.message || 'Unknown error'}`);
+      if (error?.errors) {
+        this.logger.error(`API Errors: ${JSON.stringify(error.errors, null, 2)}`);
+      }
+      if (error?.request_id) {
+        this.logger.error(`Request ID: ${error.request_id}`);
+      }
+      this.logger.error(`Full error: ${JSON.stringify(error, null, 2)}`);
       throw error;
     }
   }
@@ -109,15 +147,21 @@ export class GoogleAdsService implements OnModuleInit {
     name: string,
     amountMicros: number,
   ): Promise<{ resource_name: string }> {
-    const result = await this.customer.campaignBudgets.create([
-      {
-        name: `Budget: ${name}`,
-        amount_micros: amountMicros,
-        delivery_method: enums.BudgetDeliveryMethod.STANDARD,
-      },
-    ]);
+    const budgetData = {
+      name: `Budget: ${name}`,
+      amount_micros: amountMicros,
+      delivery_method: enums.BudgetDeliveryMethod.STANDARD,
+    };
+    this.logger.debug(`Budget request data: ${JSON.stringify(budgetData)}`);
 
-    return { resource_name: result.results[0].resource_name! };
+    try {
+      const result = await this.customer.campaignBudgets.create([budgetData]);
+      this.logger.debug(`Budget response: ${JSON.stringify(result)}`);
+      return { resource_name: result.results[0].resource_name! };
+    } catch (error: any) {
+      this.logger.error(`Budget creation failed: ${JSON.stringify(error)}`);
+      throw error;
+    }
   }
 
   private async createAdGroup(
@@ -125,18 +169,23 @@ export class GoogleAdsService implements OnModuleInit {
     name: string,
     cpcBidMicros: number,
   ): Promise<{ resource_name: string }> {
-    const result = await this.customer.adGroups.create([
-      {
-        campaign: campaignResourceName,
-        name: `AG: ${name}`,
-        status: enums.AdGroupStatus.ENABLED,
-        type: enums.AdGroupType.SEARCH_STANDARD,
-        cpc_bid_micros: cpcBidMicros,
-      },
-    ]);
+    const adGroupData = {
+      campaign: campaignResourceName,
+      name: `AG: ${name}`,
+      status: enums.AdGroupStatus.ENABLED,
+      type: enums.AdGroupType.SEARCH_STANDARD,
+      cpc_bid_micros: cpcBidMicros,
+    };
+    this.logger.debug(`Ad group request data: ${JSON.stringify(adGroupData)}`);
 
-    this.logger.log(`Ad group created: ${result.results[0].resource_name}`);
-    return { resource_name: result.results[0].resource_name! };
+    try {
+      const result = await this.customer.adGroups.create([adGroupData]);
+      this.logger.debug(`Ad group response: ${JSON.stringify(result)}`);
+      return { resource_name: result.results[0].resource_name! };
+    } catch (error: any) {
+      this.logger.error(`Ad group creation failed: ${JSON.stringify(error)}`);
+      throw error;
+    }
   }
 
   private async addKeywords(
@@ -151,9 +200,15 @@ export class GoogleAdsService implements OnModuleInit {
         match_type: enums.KeywordMatchType.BROAD,
       },
     }));
+    this.logger.debug(`Keywords request data: ${JSON.stringify(keywordOperations)}`);
 
-    await this.customer.adGroupCriteria.create(keywordOperations as any);
-    this.logger.log(`${keywords.length} keywords added to ad group`);
+    try {
+      const result = await this.customer.adGroupCriteria.create(keywordOperations as any);
+      this.logger.debug(`Keywords response: ${JSON.stringify(result)}`);
+    } catch (error: any) {
+      this.logger.error(`Keywords creation failed: ${JSON.stringify(error)}`);
+      throw error;
+    }
   }
 
   private async createResponsiveSearchAd(
@@ -165,21 +220,26 @@ export class GoogleAdsService implements OnModuleInit {
     const headlineAssets = headlines.map((text) => ({ text: text.substring(0, 30) }));
     const descriptionAssets = descriptions.map((text) => ({ text: text.substring(0, 90) }));
 
-    await this.customer.adGroupAds.create([
-      {
-        ad_group: adGroupResourceName,
-        status: enums.AdGroupAdStatus.ENABLED,
-        ad: {
-          responsive_search_ad: {
-            headlines: headlineAssets,
-            descriptions: descriptionAssets,
-          },
-          final_urls: [finalUrl],
+    const adData = {
+      ad_group: adGroupResourceName,
+      status: enums.AdGroupAdStatus.ENABLED,
+      ad: {
+        responsive_search_ad: {
+          headlines: headlineAssets,
+          descriptions: descriptionAssets,
         },
+        final_urls: [finalUrl],
       },
-    ]);
+    };
+    this.logger.debug(`Ad request data: ${JSON.stringify(adData, null, 2)}`);
 
-    this.logger.log('Responsive search ad created');
+    try {
+      const result = await this.customer.adGroupAds.create([adData]);
+      this.logger.debug(`Ad response: ${JSON.stringify(result)}`);
+    } catch (error: any) {
+      this.logger.error(`Ad creation failed: ${JSON.stringify(error)}`);
+      throw error;
+    }
   }
 
   async pauseCampaign(campaignResourceName: string): Promise<void> {
@@ -250,6 +310,31 @@ export class GoogleAdsService implements OnModuleInit {
     `;
 
     return this.customer.query(query);
+  }
+
+  async getAccountInfo(): Promise<any> {
+    this.logger.log('Fetching account info...');
+    const query = `
+      SELECT
+        customer.id,
+        customer.descriptive_name,
+        customer.currency_code,
+        customer.time_zone,
+        customer.test_account,
+        customer.manager,
+        customer.status
+      FROM customer
+      LIMIT 1
+    `;
+
+    try {
+      const result = await this.customer.query(query);
+      this.logger.log(`Account info: ${JSON.stringify(result, null, 2)}`);
+      return result[0] || null;
+    } catch (error: any) {
+      this.logger.error(`Error fetching account info: ${JSON.stringify(error)}`);
+      throw error;
+    }
   }
 
   private formatDate(date: Date): string {

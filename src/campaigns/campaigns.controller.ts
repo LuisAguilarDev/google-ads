@@ -100,6 +100,19 @@ export class CampaignsController {
     return this.campaignsService.listActiveCampaigns();
   }
 
+  @Get('account-info')
+  @ApiOperation({
+    summary: 'Info de la cuenta',
+    description: 'Retorna información de la cuenta de Google Ads conectada',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Información de la cuenta',
+  })
+  async getAccountInfo(): Promise<any> {
+    return this.campaignsService.getAccountInfo();
+  }
+
   @Get('stored')
   @ApiOperation({
     summary: 'Listar campañas almacenadas',

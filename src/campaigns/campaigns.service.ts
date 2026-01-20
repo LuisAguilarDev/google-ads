@@ -190,6 +190,10 @@ export class CampaignsService {
     return this.googleAdsService.getCampaignStats(campaignId);
   }
 
+  async getAccountInfo(): Promise<any> {
+    return this.googleAdsService.getAccountInfo();
+  }
+
   async listActiveCampaigns(): Promise<any[]> {
     return this.googleAdsService.listActiveCampaigns();
   }
